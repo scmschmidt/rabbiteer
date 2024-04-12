@@ -543,7 +543,34 @@ def main():
                             message = f'''check={check_result['check_id']} agent_id={agents_check_result['agent_id']} result={check_result['result']} execution_id={response['execution_id']}'''
                             if 'message' in agents_check_result:
                                 message += f''' message="{agents_check_result['message']}" type={agents_check_result['type']}'''
-                            print(message)    
+                            print(message)  
+                    
+                    
+                    
+                    #TODO: FOR EVALUATION PURPOSES CURRENTLY
+                    if 'CARROT' in os.environ:
+                        import pprint
+                        result_evaluated = {'result': response['result'],
+                                            'checks_results': []
+                                           }
+                        for check_result in response['check_results']:
+                            check_result_evaluated = {'agents_check_results': [],
+                                                      'check_id': check_result['check_id'],
+                                                      'expectation_results': [], #TODO
+                                                      'result': check_result['result']
+                                                     }
+                            for agents_check_result in check_result['agents_check_results']:
+                                pprint.pprint(agents_check_result)
+                                check_result_evaluated['agents_check_results'].append({'agent_id': agents_check_result['agent_id'],
+                                                                                                   'expectation_evaluations': agents_check_result['expectation_evaluations'], # [x['return_value'] for x in agents_check_result['expectation_evaluations']]
+                                                                                                   'message': agents_check_result['message'] if message in agents_check_result else None
+                                                                                                  })
+                                
+                            result_evaluated['checks_results'].append(check_result_evaluated)
+                        print('\n---')
+                        pprint.pprint(result_evaluated)
+                        
+                        
 
                 except Exception as err:
                     unknown_response(response, err)
