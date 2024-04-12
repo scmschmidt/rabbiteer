@@ -6,7 +6,9 @@ CLI tool to interact with Wanda using its API (https://www.trento-project.io/wan
 
 - Clone this repo.
 
-#TODO: PYTHON REQUIREMENTS
+- Install the Python modules either via `pip` or distribution packages: 
+    - argparse
+    - requests
 
 ## Usage
 
