@@ -26,9 +26,11 @@ Changelog:
                             - Issue: For some reason starting an execution requires explicitly "v1" in the uri. Its a bug.
 30.10.2023      v0.7.1      - Fixed two typos and removed the "v1" from the URI to start executions. Trento Core Team has fixed the issue.
 10.04.2024      v0.8        - Removed -p in favor of -e which allows setting newly available environment parameters.
-
-                            - Code cleaning
-
+12.04.2024      v0.9        - Some minor code cleaning.
+                            - Reworked Rabbiteer class (execute_check) to use exceptions and do not terminate directly. 
+                              This was necessary for integration into the project https://github.com/scmschmidt/trento_checks_for_supportconfig.
+                            - Running dots can now be disabled (--no-progress) and are printed to stderr to not disrupt output processing.  
+                            - Increased polling interval on Rabbiteer.execute_check() from 0.5 to 1s.
 """
 
 import argparse
@@ -44,7 +46,7 @@ import uuid
 from typing import List, Dict, Any
 
 
-__version__ = '0.8'
+__version__ = '0.9'
 __author__ = 'soeren.schmidt@suse.com'
 
 
@@ -61,8 +63,7 @@ class Rabbiteer():
         The response is available in self.response.
         If post_data is given, a POST otherwise a GET request is done.
         
-        If the HTTP connection fails, print the error message to 
-        stderr and terminate with exit code 1.
+        If the HTTP connection fails, an exception will be raised.
         
         If the Wanda API requires authentication, either the access key
         or credentials to the Trento web interface must be given to retrieve
@@ -77,17 +78,15 @@ class Rabbiteer():
                                            'password': self.trento_credential['password']},
                                      timeout=10)
             except Exception as err:
-                print(f'Connection error:{err}', file=sys.stderr)
-                sys.exit(1) 
+                raise RabbiteerConnectionError(f'Connection error:{err}')
+
             if not response.ok:
-                print(f'Could not authenticate against Trento. Error:{response.status_code}\n{response.text}', file=sys.stderr)
-                sys.exit(1)
+                raise RabbiteerTrentoError(f'Could not authenticate against Trento. Error:{response.status_code}\n{response.text}')
             else:
                 try:
                     self.access_key = response.json()['access_token']
                 except Exception as err:
-                    print(f'Could not retrieve access key from Trento: {err}', file=sys.stderr)
-                    sys.exit(1)   
+                    raise RabbiteerTrentoError(f'Could not retrieve access key from Trento: {err}')  
 
         # Build the headers
         headers = {'accept': 'application/json', 'Content-Type': 'application/json'}
@@ -103,16 +102,12 @@ class Rabbiteer():
                 self.response = requests.get(url, headers=headers)
                 logging.debug(f'GET REQUEST\n\tURL: {url}\n\theaders: {headers}\n\thttp status: {self.response.status_code}\n\tresponse: {self.response.text}')
         except Exception as err:
-            print(f'Error connecting to "{url}": {err}', file=sys.stderr)
-            sys.exit(1)
+            raise RabbiteerConnectionError(f'Error connecting to "{url}": {err}')
 
     def _http_status_err(self) -> None:
-        """If the request returned with a error HTTP status code, print
-        error message and terminates with exitcode 1.
-        """
+        """Raises RabbiteerConnectionError exception if the request returned with a error HTTP status code."""
         if not self.response.ok:
-            print(f'Failed with status code: {self.response.status_code}\n{self.response.text}', file=sys.stderr)
-            sys.exit(1)
+            raise RabbiteerConnectionError(f'Failed with status code: {self.response.status_code}\n{self.response.text}')
 
     def list_executions(self) -> dict:
         """Returns executions from Wanda."""
@@ -146,10 +141,11 @@ class Rabbiteer():
                        agent_ids: List[str], 
                        environment: Dict[str, str], 
                        check_ids: List[str], 
-                       timeout: int = None
+                       timeout: int = None,
+                       running_dots: bool = True
                       ) -> dict:
         """Execute checks on agents and returns the result as dictionary.
-        Terminates if anything goes wrong or the result is not as expected. 
+        Raises exceptions if anything goes wrong or the result is not as expected. 
         """
 
         # We need to fetch keys from the check's metadata, which have to be part of the request.
@@ -161,14 +157,10 @@ class Rabbiteer():
                     for mandatory_key in ['target_type']:
                         current_metadata[mandatory_key] = check['metadata'][mandatory_key]
                 except:
-                    print(f'''Mandatory key "{mandatory_key}" is not part of metadata of check {check['id']}.''', file=sys.stderr)
-                    print('This is a bug in the check', file=sys.stderr)
-                    sys.exit(2)
+                    raise RabiteerMetadataError(f'''Mandatory key "{mandatory_key}" is not part of metadata of check {check['id']}.\nThis is a bug in the check.''')
                 if metadata:
                     if metadata != current_metadata:
-                        print(f'If multiple checks are executed, the metadata must be identical!', file=sys.stderr)
-                        print(f'''"{current_metadata}" of check {check['id']} differs from the metadata of the previous checks "{metadata}".''', file=sys.stderr)
-                        sys.exit(2)
+                        raise RabiteerMetadataError(f'''If multiple checks are executed, the metadata must be identical!\n"{current_metadata}" of check {check['id']} differs from the metadata of the previous checks "{metadata}".''')
                 else:
                     metadata = current_metadata
 
@@ -187,14 +179,10 @@ class Rabbiteer():
         
         # Check if the check does not exist.
         if self.response.status_code == 422:
-            try:
-                if self.response.json()['error']['detail'] == 'no_checks_selected':
-                    print('None of the checks exist!')
-                    sys.exit(2)
-            except Exception as err:
-                print(f'Error parsing response checking execution {execution_id}: {err}', file=sys.stderr)
-                print(f'Response was: {self.response.text}', file=sys.stderr)
-                sys.exit(3)
+            detail = self.response.json().get('error', {}).get('detail')
+            if detail and detail == 'no_checks_selected':
+                raise RabbiteerRepsonseError('None of the checks exist!', None)
+            raise RabbiteerRepsonseError('Wanda response: 422 - Unprocessable content', None)
         else:
             self._http_status_err()  
 
@@ -206,49 +194,65 @@ class Rabbiteer():
 
             # Check if execution might not yet exist.
             if self.response.status_code == 404:
-                try:
-                    error_titles = [e['title'] for e in self.response.json()['errors'] if 'title' in e.keys()]
-                    if 'Not Found' in error_titles:
-                        logging.debug(f'Execution {execution_id} not yet available...\n\t{self.response.text}')
-                        if timeout and time.time() - start_time > timeout:
-                            print(f'Execution {execution_id} did not show up in time (within {timeout}s)!' , file=sys.stderr)
-                            sys.exit(4)
-                        time.sleep(.5)
-                        continue
-                except Exception as err:
-                    print(f'Error parsing response checking execution {execution_id}: {err}', file=sys.stderr)
-                    print(f'Response was: {self.response.text}', file=sys.stderr)
-                    sys.exit(3)
+                error_titles = [e['title'] for e in self.response.json()['errors'] if 'title' in e.keys()]
+                if 'Not Found' in error_titles:
+                    logging.debug(f'Execution {execution_id} not yet available...\n\t{self.response.text}')
+                    if timeout and time.time() - start_time > timeout:
+                        raise RabbiteerTimeOut(f'Execution {execution_id} did not show up in time (within {timeout}s)!')
+                    time.sleep(.5)
+                    continue
 
             # Terminate if we encounter an unknown error response. 
             self._http_status_err() 
 
             # Check if execution has been completed yet.
-            try:
-                status = self.response.json()['status']
-                if status == 'running':
-                    print('.', end='', flush=True)
-                    
-                    logging.debug(f'Execution {execution_id} still running...\n\t{self.response.text}')
-                    if timeout and time.time() - start_time > timeout:
-                        print(f'Execution {execution_id} did not finish in time (within {timeout}s)!' , file=sys.stderr)
-                        sys.exit(4)
-                    time.sleep(.5)
-                    continue
-                elif status == 'completed':
-                    logging.debug(f'Execution {execution_id} has been completed.\n\t{self.response.text}')
-                    running = False
-                else:
-                    print(f'Execution {execution_id} returned an unknown status: {status}', file=sys.stderr)
-                    print(f'Response was:\n{self.response.text}', file=sys.stderr)
-                    sys.exit(3)
-            except Exception as err:
-                print(f'Error accessing response checking execution {execution_id}: {err}', file=sys.stderr)
-                print(f'Response was:\n{self.response.text}', file=sys.stderr)
-                sys.exit(3)
+            status = self.response.json()['status']
+            if status == 'running':
+                if running_dots:
+                    print('.', end='', flush=True, file=sys.stderr) 
+                
+                logging.debug(f'Execution {execution_id} still running...\n\t{self.response.text}')
+                if timeout and time.time() - start_time > timeout:
+                    raise RabbiteerTimeOut(f'Execution {execution_id} did not finish in time (within {timeout}s)!')
+                time.sleep(1)
+                continue
+            elif status == 'completed':
+                if running_dots:
+                    print('', flush=True, file=sys.stderr) 
+                logging.debug(f'Execution {execution_id} has been completed.\n\t{self.response.text}')
+                running = False
+            else:
+                raise RabbiteerRepsonseError(f'Execution {execution_id} returned an unknown status: {status}', self.response.text)
+
         
         logging.debug(f'Response of {execution_id}: {self.response.text}')
         return self.response.json()
+
+
+class RabbiteerConnectionError(Exception):
+    pass
+
+
+class RabbiteerTrentoError(Exception):
+    pass
+
+
+class RabiteerMetadataError(Exception):
+    pass    
+
+    
+class RabbiteerRepsonseError(Exception):
+    
+    def __init__(self, message, response):
+        message_redone = [message]
+        if response:
+            for error in json.loads(response)['errors']:
+                message_redone.append(f'''{error['title']}: {error['detail']}: {error['source']}''')
+        super().__init__('\n'.join(message_redone))
+
+
+class RabbiteerTimeOut(Exception):
+    pass
 
 class ArgParser(argparse.ArgumentParser):
 
@@ -312,6 +316,7 @@ class ArgParser(argparse.ArgumentParser):
                         -c, --check CHECK...        Trento check id (e.g. 21FCA6)
                         -t, --target                agent uuid of target host (e.g. )
                         --timeout TIMEOUT           timeout in seconds waiting for an execution to appear or to complete 
+                        --no-progress               disables progress dots during check execution
 
                 Exit codes:
 
@@ -390,6 +395,10 @@ def argument_parse() -> argparse.Namespace:
     
     # Command: ExecuteCheck
     parser_execute_check = subparsers.add_parser('ExecuteCheck')
+    parser_execute_check.add_argument('--no-progress',
+                                      dest='progress_dots',
+                                      action='store_false',
+                                      required=False)
     parser_execute_check.add_argument('-e', '--env',
                                       dest='environment',
                                       action='append',
@@ -466,7 +475,7 @@ def argument_parse() -> argparse.Namespace:
         
     # Set debugging.
     if args_parsed.debug:
-        logging.basicConfig(level=logging.DEBUG, format='[%(levelname)s] %(asctime)s\n%(message)s')
+        logging.basicConfig(level=logging.DEBUG, format='[%(levelname)s] %(asctime)s\n%(message)s\n---')
         
     # Retrieving access key, if file was given.
     if args_parsed.access_keyfile:
@@ -513,103 +522,120 @@ def main():
 
     arguments = argument_parse()
     connection = Rabbiteer(arguments.url, arguments.access_key, arguments.credential)
-    
-    # Command: ExecuteCheck
-    if arguments.command == 'ExecuteCheck':
-
-        # Start check(s) execution.
-        response = connection.execute_checks(sum(arguments.agents, []), arguments.environment, sum(arguments.checks, []), timeout=arguments.timeout)
-
-        # Print full response or evaluation.
-        if arguments.raw_output:
-            print(json.dumps(response))
-        else:
-            try:
-                for check_result in response['check_results']:
-                    for agents_check_result in check_result['agents_check_results']:
-                        message = f'''check={check_result['check_id']} agent_id={agents_check_result['agent_id']} result={check_result['result']} execution_id={response['execution_id']}'''
-                        if 'message' in agents_check_result:
-                            message += f''' message="{agents_check_result['message']}" type={agents_check_result['type']}'''
-                        print(message)    
-
-            except Exception as err:
-                unknown_response(response, err)
-                
-    # Command: ListExecutions
-    elif arguments.command == 'ListExecutions':
+    try:
         
-        # Retrieve Executions.
-        response = connection.list_executions()
+        # Command: ExecuteCheck
+        if arguments.command == 'ExecuteCheck':
 
-        # Print full response or evaluation.
-        if arguments.raw_output:
-            print(json.dumps(response))
-        else:
-            try:
-                count = 0
-                for item in response['items']:
-                    if item['status'] != arguments.scope and arguments.scope != 'all':
-                        continue
-                    count += 1
-                    print(f'''{item['execution_id']}: {item['status']}\n    start : {item['started_at']}\n    end   : {item['completed_at']}\n    group : {item['group_id']}''')
-                    for targets in item['targets']:
-                        print(f'''    target: {targets['agent_id']}   checks: {' '.join(targets['checks'])}''') 
-                print(f'''\n{len(response['items'])} execution(s) found, {count} listed.''')
-            except Exception as err:
-                unknown_response(response, err)
+            # Start check(s) execution.
+            response = connection.execute_checks(sum(arguments.agents, []), arguments.environment, sum(arguments.checks, []),
+                                                 timeout=arguments.timeout,
+                                                 running_dots=arguments.progress_dots
+                                                )
 
-    # Command: ListChecks
-    elif arguments.command == 'ListChecks':
-    
-        # Retrieve checks.
-        response = connection.list_catalog()
+            # Print full response or evaluation.
+            if arguments.raw_output:
+                print(json.dumps(response))
+            else:
+                try:
+                    for check_result in response['check_results']:
+                        for agents_check_result in check_result['agents_check_results']:
+                            message = f'''check={check_result['check_id']} agent_id={agents_check_result['agent_id']} result={check_result['result']} execution_id={response['execution_id']}'''
+                            if 'message' in agents_check_result:
+                                message += f''' message="{agents_check_result['message']}" type={agents_check_result['type']}'''
+                            print(message)    
 
-        # Print full response or evaluation.
-        if arguments.raw_output:
-            print(json.dumps(response))
-        else:
-            try:
-                checks = response['items']
-                for check in checks:
-                    print(f'''{check['id']} - {check['name']} ({check['group']})''')
-            except Exception as err:
-                print(f'Could not evaluate response:\n{response}\n\nError: {err}', file=sys.stderr)
-                sys.exit(3)
-            print(f'\n{len(checks)} check(s) found.')
+                except Exception as err:
+                    unknown_response(response, err)
+                    
+        # Command: ListExecutions
+        elif arguments.command == 'ListExecutions':
             
-    # Command: Health
-    elif arguments.command == 'Health':
-    
-        # Retrieve health.
-        response = connection.health()
+            # Retrieve Executions.
+            response = connection.list_executions()
 
-        # Print full response or evaluation.
-        if arguments.raw_output:
-            print(json.dumps(response))
-        else:
-            try:
-                for key, value in response.items():
-                    print(f'{key}: {value}')
-            except Exception as err:
-                print(f'Could not evaluate response:\n{response}\n\nError: {err}', file=sys.stderr)
-                sys.exit(3)
+            # Print full response or evaluation.
+            if arguments.raw_output:
+                print(json.dumps(response))
+            else:
+                try:
+                    count = 0
+                    for item in response['items']:
+                        if item['status'] != arguments.scope and arguments.scope != 'all':
+                            continue
+                        count += 1
+                        print(f'''{item['execution_id']}: {item['status']}\n    start : {item['started_at']}\n    end   : {item['completed_at']}\n    group : {item['group_id']}''')
+                        for targets in item['targets']:
+                            print(f'''    target: {targets['agent_id']}   checks: {' '.join(targets['checks'])}''') 
+                    print(f'''\n{len(response['items'])} execution(s) found, {count} listed.''')
+                except Exception as err:
+                    unknown_response(response, err)
 
-    # Command: Ready
-    elif arguments.command == 'Ready':
-    
-        # Retrieve health.
-        response = connection.readiness()
+        # Command: ListChecks
+        elif arguments.command == 'ListChecks':
+        
+            # Retrieve checks.
+            response = connection.list_catalog()
 
-        # Print full response or evaluation.
-        if arguments.raw_output:
-            print(json.dumps(response))
-        else:
-            try:
-                print(f'''{response['ready']}''')
-            except Exception as err:
-                print(f'Could not evaluate response:\n{response}\n\nError: {err}', file=sys.stderr)
-                sys.exit(3)
+            # Print full response or evaluation.
+            if arguments.raw_output:
+                print(json.dumps(response))
+            else:
+                try:
+                    checks = response['items']
+                    for check in checks:
+                        print(f'''{check['id']} - {check['name']} ({check['group']})''')
+                except Exception as err:
+                    print(f'Could not evaluate response:\n{response}\n\nError: {err}', file=sys.stderr)
+                    sys.exit(3)
+                print(f'\n{len(checks)} check(s) found.')
+                
+        # Command: Health
+        elif arguments.command == 'Health':
+        
+            # Retrieve health.
+            response = connection.health()
 
+            # Print full response or evaluation.
+            if arguments.raw_output:
+                print(json.dumps(response))
+            else:
+                try:
+                    for key, value in response.items():
+                        print(f'{key}: {value}')
+                except Exception as err:
+                    print(f'Could not evaluate response:\n{response}\n\nError: {err}', file=sys.stderr)
+                    sys.exit(3)
+
+        # Command: Ready
+        elif arguments.command == 'Ready':
+        
+            # Retrieve health.
+            response = connection.readiness()
+
+            # Print full response or evaluation.
+            if arguments.raw_output:
+                print(json.dumps(response))
+            else:
+                try:
+                    print(f'''{response['ready']}''')
+                except Exception as err:
+                    print(f'Could not evaluate response:\n{response}\n\nError: {err}', file=sys.stderr)
+                    sys.exit(3)
+
+    # Catch Rabbiteer exceptions.
+    except (RabbiteerConnectionError, RabbiteerTrentoError) as err:
+        print(err, file=sys.stderr)
+        sys.exit(1)  
+    except RabiteerMetadataError as err:
+        print(err, file=sys.stderr)
+        sys.exit(2)  
+    except RabbiteerRepsonseError as err:
+        print(err, file=sys.stderr)
+        sys.exit(3)  
+    except RabbiteerTimeOut as err:
+        print(err, file=sys.stderr)
+        sys.exit(4) 
 
     sys.exit(0)
 
