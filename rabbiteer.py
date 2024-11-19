@@ -32,11 +32,11 @@ Changelog:
                             - Running dots can now be disabled (--no-progress) and are printed to stderr to not disrupt output processing.  
                             - Increased polling interval on Rabbiteer.execute_check() from 0.5 to 1s.
                             - Support for -c CHECK for ListChecks.
-19.11.2024      v1.0        - Rework check execution to get unambiguous results (`critical`, `warning`, `passing`) for each check and not only
+20.11.2024      v1.0        - Rework check execution to get unambiguous results (`critical`, `warning`, `passing`) for each check and not only
                               a summarized overall worst result. This means, that for each check first the expectation type gets evaluated
                               (`ListChecks`) and depending on the type, one or multiple execution calls get fired (`expect_same` is one call for
                               all agents and `expect` and `expect_enum` are separate calls per agent for the check).
-                              
+                            - Add --json and --details to ExecuteCheck for the project https://github.com/scmschmidt/trento_checks_for_supportconfig.
 """
 
 import argparse
@@ -303,7 +303,8 @@ class ArgParser(argparse.ArgumentParser):
         text = f'''
                 Usage:  {prog} -h|--help
                         {prog} [-d|--debug] [-r|--raw] [-a KEY|-A KEYFILE|-f CRED|-F CREDFILE] URL ListExecutions [SCOPE]
-                        {prog} [-d|--debug] [-r|--raw] [-a KEY|-A KEYFILE|-f CRED|-F CREDFILE] URL ExecuteCheck -e ENV_PARAM... -t|--target TARGET... -c|--check CHECK... [--timeout TIMEOUT]
+                        {prog} [-d|--debug] [-r|--raw] [-a KEY|-A KEYFILE|-f CRED|-F CREDFILE] URL ExecuteCheck -e ENV_PARAM...
+                        {len(prog) * ' '} -t|--target TARGET... -c|--check CHECK... [--timeout TIMEOUT] [--json] [--details]
                         {prog} [-d|--debug] [-r|--raw] [-a KEY|-A KEYFILE|-f CRED|-F CREDFILE] URL ListChecks [-c|--check CHECK...]
                         {prog} [-d|--debug] [-r|--raw] [-a KEY|-A KEYFILE|-f CRED|-F CREDFILE] URL Health
                         {prog} [-d|--debug] [-r|--raw] [-a KEY|-A KEYFILE|-f CRED|-F CREDFILE] URL Ready
@@ -357,6 +358,8 @@ class ArgParser(argparse.ArgumentParser):
                         -t, --target                agent uuid of target host (e.g. )
                         --timeout TIMEOUT           timeout in seconds waiting for an execution to appear or to complete 
                         --no-progress               disables progress dots during check execution
+                        --json                      print results as JSON string
+                        --details                   results are more detailed
 
                     ListChecks:
                     
@@ -466,7 +469,15 @@ def argument_parse() -> argparse.Namespace:
                                       dest='timeout',
                                       action='store',
                                       required = False,
-                                      type=int)  
+                                      type=int)
+    parser_execute_check.add_argument('--json',
+                                      dest='json_output',
+                                      action='store_true',
+                                      required = False) 
+    parser_execute_check.add_argument('--details',
+                                      dest='details',
+                                      action='store_true',
+                                      required = False)   
 
     # Command: ListChecks
     parser_list_checks = subparsers.add_parser('ListChecks')
@@ -624,15 +635,23 @@ def main():
             else:               
                 try:
                     # Walk trough all the responses of the execution requests.
+                    results = []
                     for response in responses:
                         
                         # With one check per execution request, the `check_results`
                         # list has only one element.
                         check_result = response['check_results'][0]
+                                               
+                        #TODO: Implement arguments.details            
                                                     
                         # Walk through the agent's results.    
                         for agents_check_result in check_result['agents_check_results']:
-                            result = f'''check={check_result['check_id']} agent_id={agents_check_result['agent_id']} result={check_result['result']} execution_id={response['execution_id']}'''
+                            result = {'check': check_result['check_id'],
+                                      'agent_id': agents_check_result['agent_id'],
+                                      'result': check_result['result'],
+                                      'execution_id': response['execution_id']
+                            }
+                            #result = f'''check={check_result['check_id']} agent_id={agents_check_result['agent_id']} result={check_result['result']} execution_id={response['execution_id']}'''
                             
                             # Collect all (error) messages.
                             messages = []
@@ -646,13 +665,24 @@ def main():
                                     if 'failure_message' in evaluation :
                                         messages.append(evaluation['failure_message'])
                             if messages:
-                                result += f''' message="{'; '.join(messages)}"'''
-                            
+                                #result += f''' message="{'; '.join(messages)}"'''
+                                result['messages'] = '; '.join(messages)
+                                
                             # Add error type if present.
                             if 'type' in agents_check_result:
-                                result += f''' type={agents_check_result['type']}''' 
-                                                                                    
-                            print(result) 
+                                #result += f''' type={agents_check_result['type']}''' 
+                                result['type'] = agents_check_result['type']
+                            
+                            results.append(result)                                
+                                   
+                    # print "human-readable" line or JSON string.
+                    if arguments.json_output:
+                        print(json.dumps(results))
+                    else:
+                        for result in results:
+                            for key, value in result.items():
+                                print(f'{key}="{value}"', end=' ')
+                            print()    
 
                 except Exception as err:
                     unknown_response(responses, err)
