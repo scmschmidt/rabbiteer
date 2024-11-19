@@ -52,7 +52,7 @@ import uuid
 from typing import List, Dict, Any
 
 
-__version__ = '0.9'
+__version__ = '1.0'
 __author__ = 'soeren.schmidt@suse.com'
 
 
@@ -149,14 +149,12 @@ class Rabbiteer():
                        check_ids: List[str], 
                        timeout: int = None,
                        running_dots: bool = True
-                      ) -> dict:
-        """Execute checks on agents and returns the results as dictionary.
+                      ) -> List[Any]:
+        """Execute checks on agents and returns the results as list.
         Raises exceptions if anything goes wrong or the result is not as expected. 
         Each check is treated separately and depending on the expectation type one 
         (`expect_same`) or multiple execution calls (`expect` and `expect_enum`)
         get fired.
-        The result dictionary has the check ids as key and as value a dict with the
-        agent ids as key and the response as value.
         """
 
         # Get check catalog.
@@ -166,7 +164,7 @@ class Rabbiteer():
         # and we extract the expectation type.
         checks_metadata = {}
         checks_expectationtype = {}
-        responses = {}
+        responses = []
         for check in catalog:
             if check['id'] in check_ids:
                 metadata = {}
@@ -183,7 +181,6 @@ class Rabbiteer():
         
         # Walk through each requested check.
         for check_id in check_ids:
-            responses[check_id] = {}
             data = {'env': environment,
                 'execution_id': None,
                 'group_id': str(uuid.uuid4()),
@@ -197,14 +194,13 @@ class Rabbiteer():
                 for agent_id in agent_ids:
                     data['targets'].append({'agent_id': agent_id, 'checks': [check_id]})
                 data['execution_id'] = str(uuid.uuid4())                    
-                response = self._call_execute(data, timeout=timeout, running_dots=running_dots)
-                responses[check_id][agent_id] = response  
+                responses.append(self._call_execute(data, timeout=timeout, running_dots=running_dots))
             # ... otherwise one call per agent.
             else:
                 for agent_id in agent_ids:
                     data['targets'] = [{'agent_id': agent_id, 'checks': [check_id]}]
                     data['execution_id'] = str(uuid.uuid4())
-                    responses[check_id][agent_id] = self._call_execute(data, timeout=timeout, running_dots=running_dots)
+                    responses.append(self._call_execute(data, timeout=timeout, running_dots=running_dots))
              
         return responses
 
@@ -605,7 +601,6 @@ def prune_object(obj: Any):
                 obj.remove(e)
 
 
-
 def main():
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -622,71 +617,81 @@ def main():
                                                  timeout=arguments.timeout,
                                                  running_dots=arguments.progress_dots
                                                 )
-
+            
             # Print full responses or evaluation.
             if arguments.raw_output:
-                raw_responses = []
-                for check_responses in responses.values():
-                    for agent_response in check_responses.values():
-                        if agent_response not in raw_responses:
-                            raw_responses.append(agent_response)
-                print(json.dumps(raw_responses))     
+                print(json.dumps(responses))    
             else:               
                 try:
-                    for check, check_responses in responses.items():
-                        for agent, agent_response in check_responses.items():
-                            for check_result in agent_response['check_results']:
-                                for agents_check_result in check_result['agents_check_results']:
-                                    message = f'''check={check_result['check_id']} agent_id={agents_check_result['agent_id']} result={check_result['result']} execution_id={agent_response['execution_id']}'''
-                                    if 'message' in agents_check_result:
-                                        message += f''' message="{agents_check_result['message']}" type={agents_check_result['type']}'''
-                                    
-                                    print(message)  
-                                    
-                                    # - In case of an errors `check_results[].agents_check_results[].message` and 
-                                    # `check_results[].agents_check_results[].facts.message` exist amd contain 
-                                    # additional error messages.
+                    # Walk trough all the responses of the execution requests.
+                    for response in responses:
+                        
+                        # With one check per execution request, the `check_results`
+                        # list has only one element.
+                        check_result = response['check_results'][0]
+                                                    
+                        # Walk through the agent's results.    
+                        for agents_check_result in check_result['agents_check_results']:
+                            result = f'''check={check_result['check_id']} agent_id={agents_check_result['agent_id']} result={check_result['result']} execution_id={response['execution_id']}'''
                             
+                            # Collect all (error) messages.
+                            messages = []
+                            if 'message' in agents_check_result:
+                                messages.append(agents_check_result['message'])                           
+                            for fact in agents_check_result['facts']:
+                                if 'message' in fact:
+                                    messages.append(fact['message'])                                
+                            if 'expectation_evaluations' in agents_check_result:
+                                for evaluation in agents_check_result['expectation_evaluations']:
+                                    if 'failure_message' in evaluation :
+                                        messages.append(evaluation['failure_message'])
+                            if messages:
+                                result += f''' message="{'; '.join(messages)}"'''
+                            
+                            # Add error type if present.
+                            if 'type' in agents_check_result:
+                                result += f''' type={agents_check_result['type']}''' 
+                                                                                    
+                            print(result) 
+
                 except Exception as err:
                     unknown_response(responses, err)
-                    
-                sys.exit()
                 
-                try:
-                    for check_result in response['check_results']:
-                        for agents_check_result in check_result['agents_check_results']:
-                            message = f'''check={check_result['check_id']} agent_id={agents_check_result['agent_id']} result={check_result['result']} execution_id={response['execution_id']}'''
-                            if 'message' in agents_check_result:
-                                message += f''' message="{agents_check_result['message']}" type={agents_check_result['type']}'''
-                            print(message)  
+                # try:
+                #     for check_result in response['check_results']:
+                #         for agents_check_result in check_result['agents_check_results']:
+                #             message = f'''check={check_result['check_id']} agent_id={agents_check_result['agent_id']} result={check_result['result']} execution_id={response['execution_id']}'''
+                #             if 'message' in agents_check_result:
+                #                 message += f''' message="{agents_check_result['message']}" type={agents_check_result['type']}'''
+                #             print(message)  
                     
                     
                     
-                    #TODO: FOR EVALUATION PURPOSES CURRENTLY
-                    if 'CARROT' in os.environ:
-                        import pprint
-                        result_evaluated = {'result': response['result'],
-                                            'checks_results': []
-                                           }
-                        for check_result in response['check_results']:
-                            check_result_evaluated = {'agents_check_results': [],
-                                                      'check_id': check_result['check_id'],
-                                                      'expectation_results': [], #TODO
-                                                      'result': check_result['result']
-                                                     }
-                            for agents_check_result in check_result['agents_check_results']:
-                                pprint.pprint(agents_check_result)
-                                check_result_evaluated['agents_check_results'].append({'agent_id': agents_check_result['agent_id'],
-                                                                                                   'expectation_evaluations': agents_check_result['expectation_evaluations'], # [x['return_value'] for x in agents_check_result['expectation_evaluations']]
-                                                                                                   'message': agents_check_result['message'] if message in agents_check_result else None
-                                                                                                  })
+                #     #TODO: FOR EVALUATION PURPOSES CURRENTLY
+                #     if 'CARROT' in os.environ:
+                #         import pprint
+                #         result_evaluated = {'result': response['result'],
+                #                             'checks_results': []
+                #                            }
+                #         for check_result in response['check_results']:
+                #             check_result_evaluated = {'agents_check_results': [],
+                #                                       'check_id': check_result['check_id'],
+                #                                       'expectation_results': [], #TODO
+                #                                       'result': check_result['result']
+                #                                      }
+                #             for agents_check_result in check_result['agents_check_results']:
+                #                 pprint.pprint(agents_check_result)
+                #                 check_result_evaluated['agents_check_results'].append({'agent_id': agents_check_result['agent_id'],
+                #                                                                                    'expectation_evaluations': agents_check_result['expectation_evaluations'], # [x['return_value'] for x in agents_check_result['expectation_evaluations']]
+                #                                                                                    'message': agents_check_result['message'] if message in agents_check_result else None
+                #                                                                                   })
                                 
-                            result_evaluated['checks_results'].append(check_result_evaluated)
-                        print('\n---')
-                        pprint.pprint(result_evaluated)
+                #             result_evaluated['checks_results'].append(check_result_evaluated)
+                #         print('\n---')
+                #         pprint.pprint(result_evaluated)
                         
-                except Exception as err:
-                    unknown_response(response, err)
+                # except Exception as err:
+                #     unknown_response(response, err)
                     
         # Command: ListExecutions
         elif arguments.command == 'ListExecutions':
