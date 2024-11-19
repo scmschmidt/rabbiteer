@@ -21,7 +21,7 @@ Independent if one or multiple hosts or checks are executed, Wanda always return
   }
 ```
 
-The `result` is the **"most negative"** result of **all** executed checks, meaning one failing of many is enough to get the (overall) status tu be critical.
+The `result` is the **"most negative"** result of **all** executed checks, meaning one failing of many is enough to get the (overall) status to be critical.
 Depending on the use case `result` is useful or not.
 
 Both `execution_id` and `group_id` are arbitrary to distinguish executions in the database.
@@ -111,6 +111,20 @@ The `check_results[].expectation_results.result` can have multiple multiple valu
 - If multiple checks on one host are executed, `check_results[].result` of each `check_results` object can be used, because each of the checks has its own `check_results` object.
 
 - If one or multiple checks on multiple hosts are executed, no occurrence of `result` is distinct, since a `check_results` object combines multiple hosts and the "most negative" result is taken.  Only `check_results[].agents_check_results[].expectation_evaluations.return_value` shows the real result of a check on a specific host in such a case.
-  With having a range of values and data types it must be evaluated to get a `passing`, `warning` or `critical`.
+  With having a range of values and data types it must be evaluated to get a `passing`, `warning` or `critical`, like comparing it with all agents for `expect_same` checks. It's not simple.
 
-- In case of an errors `check_results[].agents_check_results[].message` and `check_results[].agents_check_results[].facts.message` exist amd contain additional error messages.
+
+- In case of an errors `check_results[].agents_check_results[].message` and `check_results[].agents_check_results[].facts.message` exist and contain additional error messages.
+
+
+## Consequences for `rabbiteer`
+
+The support of multiple hosts is a must otherwise `expect_same` checks could not be evaluated.
+
+Due to the constraints (see "Findings" above) an API call always contains **only one** check, otherwise the result (`critical`, `warning`, `passing`) is ambiguous. But even with one check only, ambiguity still exists with multiple agents per call. To get distinct results, the check's expectation type needs to be known. For `expect_same` the call executes the check on all agents and `result` is valid for all agents. An `expect_same` check cannot have different results on several agents. For `expect` and `expect_enum` on the other hand, one call per agent needs to be executed, so `result` contains the result of that particular check on that particular agent. This requires a `ListChecks` call before to get the expectation type of the check.
+
+
+
+
+
+

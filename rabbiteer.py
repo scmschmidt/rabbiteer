@@ -31,6 +31,12 @@ Changelog:
                               This was necessary for integration into the project https://github.com/scmschmidt/trento_checks_for_supportconfig.
                             - Running dots can now be disabled (--no-progress) and are printed to stderr to not disrupt output processing.  
                             - Increased polling interval on Rabbiteer.execute_check() from 0.5 to 1s.
+                            - Support for -c CHECK for ListChecks.
+19.11.2024      v1.0        - Rework check execution to get unambiguous results (`critical`, `warning`, `passing`) for each check and not only
+                              a summarized overall worst result. This means, that for each check first the expectation type gets evaluated
+                              (`ListChecks`) and depending on the type, one or multiple execution calls get fired (`expect_same` is one call for
+                              all agents and `expect` and `expect_enum` are separate calls per agent for the check).
+                              
 """
 
 import argparse
@@ -144,51 +150,88 @@ class Rabbiteer():
                        timeout: int = None,
                        running_dots: bool = True
                       ) -> dict:
-        """Execute checks on agents and returns the result as dictionary.
+        """Execute checks on agents and returns the results as dictionary.
         Raises exceptions if anything goes wrong or the result is not as expected. 
+        Each check is treated separately and depending on the expectation type one 
+        (`expect_same`) or multiple execution calls (`expect` and `expect_enum`)
+        get fired.
+        The result dictionary has the check ids as key and as value a dict with the
+        agent ids as key and the response as value.
         """
 
+        # Get check catalog.
+        catalog = self.list_catalog()['items']
+
         # We need to fetch keys from the check's metadata, which have to be part of the request.
-        metadata = {}
-        for check in self.list_catalog()['items']:
+        # and we extract the expectation type.
+        checks_metadata = {}
+        checks_expectationtype = {}
+        responses = {}
+        for check in catalog:
             if check['id'] in check_ids:
-                current_metadata = {}
+                metadata = {}
                 try:
                     for mandatory_key in ['target_type']:
-                        current_metadata[mandatory_key] = check['metadata'][mandatory_key]
+                       metadata[mandatory_key] = check['metadata'][mandatory_key]
                 except:
                     raise RabiteerMetadataError(f'''Mandatory key "{mandatory_key}" is not part of metadata of check {check['id']}.\nThis is a bug in the check.''')
-                if metadata:
-                    if metadata != current_metadata:
-                        raise RabiteerMetadataError(f'''If multiple checks are executed, the metadata must be identical!\n"{current_metadata}" of check {check['id']} differs from the metadata of the previous checks "{metadata}".''')
-                else:
-                    metadata = current_metadata
-
-        execution_id = str(uuid.uuid4())
-        data = {'env': environment,
-                'execution_id': execution_id,
+                checks_metadata[check['id']] = metadata
+                try:               
+                    checks_expectationtype[check['id']] = check['expectations'][0]['type']
+                except:
+                    raise RabiteerMetadataError(f'''Could not retrieve execution type of check {check['id']}.''')
+        
+        # Walk through each requested check.
+        for check_id in check_ids:
+            responses[check_id] = {}
+            data = {'env': environment,
+                'execution_id': None,
                 'group_id': str(uuid.uuid4()),
                 'targets': []
                }
-        data.update(metadata)
-        for agent_id in agent_ids:
-            data['targets'].append({'agent_id': agent_id, 'checks': check_ids})
+            data.update(checks_metadata[check_id])
 
-        # Start execution.
+            # If we have a `expect_same` check, we execute a single call for
+            # all agents,...
+            if checks_expectationtype[check_id] == 'expect_same':
+                for agent_id in agent_ids:
+                    data['targets'].append({'agent_id': agent_id, 'checks': [check_id]})
+                data['execution_id'] = str(uuid.uuid4())                    
+                response = self._call_execute(data, timeout=timeout, running_dots=running_dots)
+                responses[check_id][agent_id] = response  
+            # ... otherwise one call per agent.
+            else:
+                for agent_id in agent_ids:
+                    data['targets'] = [{'agent_id': agent_id, 'checks': [check_id]}]
+                    data['execution_id'] = str(uuid.uuid4())
+                    responses[check_id][agent_id] = self._call_execute(data, timeout=timeout, running_dots=running_dots)
+             
+        return responses
+
+    def _call_execute(self, data: Dict[str, Any],
+                            timeout: int = None,
+                            running_dots: bool = True) -> dict:
+        """Starts a single execution call and polls for the execution to be finished.
+        Raises exceptions in case of errors otherwise returns a response object
+        """
+
+         # Start execution.
         self.make_request('/api/checks/executions/start', post_data=json.dumps(data))
         
         # Check if the check does not exist.
         if self.response.status_code == 422:
             detail = self.response.json().get('error', {}).get('detail')
             if detail and detail == 'no_checks_selected':
-                raise RabbiteerRepsonseError('None of the checks exist!', None)
-            raise RabbiteerRepsonseError('Wanda response: 422 - Unprocessable content', None)
+                raise RabbiteerRepsonseError(f'Check does not exist! Header: {data}', None)
+            raise RabbiteerRepsonseError(f'Wanda response: 422 - Unprocessable content. Header: {data}', None)
         else:
             self._http_status_err()  
 
+        execution_id = data['execution_id']
         endpoint = f'/api/checks/executions/{execution_id}'
         start_time = time.time()
         running = True
+        first_dot = False
         while running:
             self.make_request(endpoint)
 
@@ -209,7 +252,8 @@ class Rabbiteer():
             status = self.response.json()['status']
             if status == 'running':
                 if running_dots:
-                    print('.', end='', flush=True, file=sys.stderr) 
+                    print('.', end='', flush=True, file=sys.stderr)
+                    first_dot = True
                 
                 logging.debug(f'Execution {execution_id} still running...\n\t{self.response.text}')
                 if timeout and time.time() - start_time > timeout:
@@ -217,14 +261,13 @@ class Rabbiteer():
                 time.sleep(1)
                 continue
             elif status == 'completed':
-                if running_dots:
+                if running_dots and first_dot:
                     print('', flush=True, file=sys.stderr) 
                 logging.debug(f'Execution {execution_id} has been completed.\n\t{self.response.text}')
                 running = False
             else:
                 raise RabbiteerRepsonseError(f'Execution {execution_id} returned an unknown status: {status}', self.response.text)
 
-        
         logging.debug(f'Response of {execution_id}: {self.response.text}')
         return self.response.json()
 
@@ -254,6 +297,7 @@ class RabbiteerRepsonseError(Exception):
 class RabbiteerTimeOut(Exception):
     pass
 
+
 class ArgParser(argparse.ArgumentParser):
 
     def format_help(self) -> str:
@@ -264,7 +308,7 @@ class ArgParser(argparse.ArgumentParser):
                 Usage:  {prog} -h|--help
                         {prog} [-d|--debug] [-r|--raw] [-a KEY|-A KEYFILE|-f CRED|-F CREDFILE] URL ListExecutions [SCOPE]
                         {prog} [-d|--debug] [-r|--raw] [-a KEY|-A KEYFILE|-f CRED|-F CREDFILE] URL ExecuteCheck -e ENV_PARAM... -t|--target TARGET... -c|--check CHECK... [--timeout TIMEOUT]
-                        {prog} [-d|--debug] [-r|--raw] [-a KEY|-A KEYFILE|-f CRED|-F CREDFILE] URL ListChecks
+                        {prog} [-d|--debug] [-r|--raw] [-a KEY|-A KEYFILE|-f CRED|-F CREDFILE] URL ListChecks [-c|--check CHECK...]
                         {prog} [-d|--debug] [-r|--raw] [-a KEY|-A KEYFILE|-f CRED|-F CREDFILE] URL Health
                         {prog} [-d|--debug] [-r|--raw] [-a KEY|-A KEYFILE|-f CRED|-F CREDFILE] URL Ready
 
@@ -318,6 +362,13 @@ class ArgParser(argparse.ArgumentParser):
                         --timeout TIMEOUT           timeout in seconds waiting for an execution to appear or to complete 
                         --no-progress               disables progress dots during check execution
 
+                    ListChecks:
+                    
+                        Lists all checks present in Wanda. 
+                        Use -c|--check CHECK to limit the output.
+                    
+                        -c|--check CHECK...         Trento check id (e.g. 21FCA6)
+                        
                 Exit codes:
 
                     0   Everything went fine. 
@@ -423,12 +474,17 @@ def argument_parse() -> argparse.Namespace:
 
     # Command: ListChecks
     parser_list_checks = subparsers.add_parser('ListChecks')
-  
+    parser_list_checks.add_argument('-c', '--check',
+                                    dest='checks',
+                                    action='append',
+                                    required = False,
+                                    nargs='+',
+                                    type=str) 
     # Command: Health
-    parser_list_checks = subparsers.add_parser('Health')
+    parser_health = subparsers.add_parser('Health')
     
     # Command: Ready
-    parser_list_checks = subparsers.add_parser('Ready')  
+    parser_ready = subparsers.add_parser('Ready')
 
     # Parse arguments.
     args_parsed = parser.parse_args()
@@ -463,6 +519,14 @@ def argument_parse() -> argparse.Namespace:
                     sys.exit(2)
             elif key == 'target_type':
                 if value not in ['cluster', 'host']:
+                    print(f'invalid value for "target_type": {value}', file=sys.stderr)
+                    sys.exit(2)
+            elif key == 'ensa_version':
+                if value not in ['ensa1', 'ensa2', 'mixed_versions']:
+                    print(f'invalid value for "target_type": {value}', file=sys.stderr)
+                    sys.exit(2)
+            elif key == 'fs_type':
+                if value not in ['resource_managed', 'simple_mount', 'mixed_fs_types']:
                     print(f'invalid value for "target_type": {value}', file=sys.stderr)
                     sys.exit(2)
             else:
@@ -514,6 +578,32 @@ def unknown_response(response: dict, error: Exception):
 
     print(f'Could not evaluate response:\n{response}\n\nError: {error}', file=sys.stderr)
     sys.exit(3)
+    
+def prune_object(obj: Any):
+    """Recursively walks through an object (list or dict) and deletes everything except
+    dictionary keys with are in the valid key list. This is used to prune the complex 
+    response object from a check execution to a few needed entries."""
+
+    valid_keys = ['result', 'message', 'failure_message', 'return_value', 'agent_id', 'checks', 'check_id']
+    
+    if isinstance(obj, dict):
+        for k, v in obj.copy().items():
+            if isinstance(v, dict) or isinstance(v, list):
+                prune_object(v)
+                if not v:
+                    del(obj[k])
+            else:
+                if k not in valid_keys:
+                    del(obj[k])
+    elif isinstance(obj, list):
+        for e in list(obj):
+            if isinstance(e, dict) or isinstance(e, list):
+                prune_object(e)
+                if not e:
+                    obj.remove(e)
+            else:
+                obj.remove(e)
+
 
 
 def main():
@@ -528,15 +618,40 @@ def main():
         if arguments.command == 'ExecuteCheck':
 
             # Start check(s) execution.
-            response = connection.execute_checks(sum(arguments.agents, []), arguments.environment, sum(arguments.checks, []),
+            responses = connection.execute_checks(sum(arguments.agents, []), arguments.environment, sum(arguments.checks, []),
                                                  timeout=arguments.timeout,
                                                  running_dots=arguments.progress_dots
                                                 )
 
-            # Print full response or evaluation.
+            # Print full responses or evaluation.
             if arguments.raw_output:
-                print(json.dumps(response))
-            else:
+                raw_responses = []
+                for check_responses in responses.values():
+                    for agent_response in check_responses.values():
+                        if agent_response not in raw_responses:
+                            raw_responses.append(agent_response)
+                print(json.dumps(raw_responses))     
+            else:               
+                try:
+                    for check, check_responses in responses.items():
+                        for agent, agent_response in check_responses.items():
+                            for check_result in agent_response['check_results']:
+                                for agents_check_result in check_result['agents_check_results']:
+                                    message = f'''check={check_result['check_id']} agent_id={agents_check_result['agent_id']} result={check_result['result']} execution_id={agent_response['execution_id']}'''
+                                    if 'message' in agents_check_result:
+                                        message += f''' message="{agents_check_result['message']}" type={agents_check_result['type']}'''
+                                    
+                                    print(message)  
+                                    
+                                    # - In case of an errors `check_results[].agents_check_results[].message` and 
+                                    # `check_results[].agents_check_results[].facts.message` exist amd contain 
+                                    # additional error messages.
+                            
+                except Exception as err:
+                    unknown_response(responses, err)
+                    
+                sys.exit()
+                
                 try:
                     for check_result in response['check_results']:
                         for agents_check_result in check_result['agents_check_results']:
@@ -570,8 +685,6 @@ def main():
                         print('\n---')
                         pprint.pprint(result_evaluated)
                         
-                        
-
                 except Exception as err:
                     unknown_response(response, err)
                     
@@ -603,19 +716,28 @@ def main():
         
             # Retrieve checks.
             response = connection.list_catalog()
-
-            # Print full response or evaluation.
-            if arguments.raw_output:
-                print(json.dumps(response))
-            else:
-                try:
+            
+            try:
+                # Filter checks.
+                if arguments.checks:
+                    requested_checks = sum(arguments.checks, [])
+                    new_response = {'items': []}
+                    for check in response['items']:
+                        if check['id'] in requested_checks:
+                            new_response['items'].append(check)  
+                    response = new_response
+                    
+                # Print full response or evaluation.
+                if arguments.raw_output:
+                    print(json.dumps(response))
+                else:
                     checks = response['items']
                     for check in checks:
                         print(f'''{check['id']} - {check['name']} ({check['group']})''')
-                except Exception as err:
-                    print(f'Could not evaluate response:\n{response}\n\nError: {err}', file=sys.stderr)
-                    sys.exit(3)
-                print(f'\n{len(checks)} check(s) found.')
+                    print(f'\n{len(checks)} check(s) found.')
+            except Exception as err:
+                print(f'Could not evaluate response:\n{response}\n\nError: {err}', file=sys.stderr)
+                sys.exit(3)
                 
         # Command: Health
         elif arguments.command == 'Health':
