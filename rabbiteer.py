@@ -38,6 +38,8 @@ Changelog:
                               all agents and `expect` and `expect_enum` are separate calls per agent for the check).
                             - Add --json and --brief to ExecuteCheck. The option --json is required for the project
                               https://github.com/scmschmidt/trento_checks_for_supportconfig.
+20.11.2024      v1.1        - Moved formatting of ExecuteCheck output to function evaluate_check_results(), so it can be called from tcsc
+                              (https://github.com/scmschmidt/trento_checks_for_supportconfig).
 """
 
 import argparse
@@ -53,7 +55,7 @@ import uuid
 from typing import List, Dict, Any
 
 
-__version__ = '1.0'
+__version__ = '1.1'
 __author__ = 'soeren.schmidt@suse.com'
 
 
@@ -612,6 +614,61 @@ def prune_object(obj: Any):
             else:
                 obj.remove(e)
 
+def evaluate_check_results(responses: List[Any], brief: bool, json_output: bool) -> str:
+    """Takes responses list from Rabbiteer.execute_checks() and formats them to a (JSAON ) string"""
+    
+    try:
+        # Walk trough all the responses of the execution requests.
+        results = []
+        for response in responses:
+            
+            # With one check per execution request, the `check_results`
+            # list has only one element.
+            check_result = response['check_results'][0]
+            
+            # Walk through the agent's results.    
+            for agents_check_result in check_result['agents_check_results']:
+                result = {'check': check_result['check_id'],
+                            'agent_id': agents_check_result['agent_id'],
+                            'result': check_result['result']
+                            }
+                if not brief:
+                    result['execution_id'] = response['execution_id']
+
+                    # Collect all (error) messages.
+                    messages = []
+                    if 'message' in agents_check_result:
+                        messages.append(agents_check_result['message'])                           
+                    for fact in agents_check_result['facts']:
+                        if 'message' in fact:
+                            messages.append(fact['message'])                                
+                    if 'expectation_evaluations' in agents_check_result:
+                        for evaluation in agents_check_result['expectation_evaluations']:
+                            if 'failure_message' in evaluation :
+                                messages.append(evaluation['failure_message'])
+                    if messages:
+                        result['messages'] = '; '.join(messages)
+                        
+                    # Add error type if present.
+                    if 'type' in agents_check_result:
+                        result['type'] = agents_check_result['type']
+                
+                results.append(result)                                
+                        
+        # print "human-readable" line or JSON string.
+        if json_output:
+            output_string = json.dumps(results)
+        else:
+            output_string = ''
+            for result in results:
+                for key, value in result.items():
+                    output_string += f'{key}="{value}" '
+                output_string += '\n'  
+        return  output_string
+
+    except Exception as err:
+        unknown_response(responses, err)
+
 
 def main():
 
@@ -633,57 +690,8 @@ def main():
             # Print full responses or evaluation.
             if arguments.raw_output:
                 print(json.dumps(responses))    
-            else:               
-                try:
-                    # Walk trough all the responses of the execution requests.
-                    results = []
-                    for response in responses:
-                        
-                        # With one check per execution request, the `check_results`
-                        # list has only one element.
-                        check_result = response['check_results'][0]
-                       
-                        # Walk through the agent's results.    
-                        for agents_check_result in check_result['agents_check_results']:
-                            result = {'check': check_result['check_id'],
-                                      'agent_id': agents_check_result['agent_id'],
-                                      'result': check_result['result']
-                                     }
-                            if not arguments.brief:
-                                result['execution_id'] = response['execution_id']
-
-                                # Collect all (error) messages.
-                                messages = []
-                                if 'message' in agents_check_result:
-                                    messages.append(agents_check_result['message'])                           
-                                for fact in agents_check_result['facts']:
-                                    if 'message' in fact:
-                                        messages.append(fact['message'])                                
-                                if 'expectation_evaluations' in agents_check_result:
-                                    for evaluation in agents_check_result['expectation_evaluations']:
-                                        if 'failure_message' in evaluation :
-                                            messages.append(evaluation['failure_message'])
-                                if messages:
-                                    result['messages'] = '; '.join(messages)
-                                    
-                                # Add error type if present.
-                                if 'type' in agents_check_result:
-                                    result['type'] = agents_check_result['type']
-                            
-                            results.append(result)                                
-                                   
-                    # print "human-readable" line or JSON string.
-                    if arguments.json_output:
-                        print(json.dumps(results))
-                    else:
-                        for result in results:
-                            for key, value in result.items():
-                                print(f'{key}="{value}"', end=' ')
-                            print()    
-
-                except Exception as err:
-                    unknown_response(responses, err)
-
+            else:   
+                print(evaluate_check_results(responses, brief=arguments.brief, json_output=arguments.json_output))            
                     
         # Command: ListExecutions
         elif arguments.command == 'ListExecutions':
