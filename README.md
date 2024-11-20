@@ -6,7 +6,7 @@ CLI tool to interact with Wanda using its API (https://www.trento-project.io/wan
 
 - Clone this repo.
 
-- Install the Python modules either via `pip` or distribution packages: 
+- Install the Python modules either via `pip3` or distribution packages: 
     - argparse
     - requests
 
@@ -45,7 +45,7 @@ CLI tool to interact with Wanda using its API (https://www.trento-project.io/wan
   38 check(s) found.
   ```  
 
-  If a JSON string is required:
+  With all the details as JSON:
   ```
   ./rabbiteer.py -r http://localhost:4000 ListChecks
   {"items": [{"id": "00081D", "name": "Check Corosync max_messages during runtime", "values": [{"def...
@@ -57,10 +57,17 @@ CLI tool to interact with Wanda using its API (https://www.trento-project.io/wan
   ```
   ./rabbiteer.py http://localhost:4000 ExecuteCheck -e provider=azure -c 156F64 -t b651491b-904d-5448-9350-fe817c1f2c6e
 
-  check=156F64 agent_id=b651491b-904d-5448-9350-fe817c1f2c6e result=critical execution_id=f248f923-2c88-4a19-8f57-52691fb72615
+check="156F64" agent_id="b651491b-904d-5448-9350-fe817c1f2c6e" result="passing" execution_id="8a0d85f0-5ab9-4c26-aeb8-7e4c0248195a"
   ```
 
-  Running 156F64 for an Azure host (full WANDA JSON response):
+  Running 156F64 for an Azure host (human-readable summary) with JSON output:
+  ```
+  ./rabbiteer.py http://localhost:4000 ExecuteCheck -e provider=azure -c 156F64 -t b651491b-904d-5448-9350-fe817c1f2c6e --json
+
+  [{"check": "156F64", "agent_id": "b651491b-904d-5448-9350-fe817c1f2c6", "result": "passing", "execution_id": "83a0de89-57f7-4699-ba61-40e9fb9b49df"}]
+  ```
+
+  Running 156F64 for an Azure host (full Wanda JSON response):
   ```
   ./rabbiteer.py -r http://localhost:4000 ExecuteCheck -e provider=azure -c 156F64 -t b651491b-904d-5448-9350-fe817c1f2c6e
 

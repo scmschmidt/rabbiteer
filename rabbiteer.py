@@ -36,7 +36,8 @@ Changelog:
                               a summarized overall worst result. This means, that for each check first the expectation type gets evaluated
                               (`ListChecks`) and depending on the type, one or multiple execution calls get fired (`expect_same` is one call for
                               all agents and `expect` and `expect_enum` are separate calls per agent for the check).
-                            - Add --json and --details to ExecuteCheck for the project https://github.com/scmschmidt/trento_checks_for_supportconfig.
+                            - Add --json and --brief to ExecuteCheck. The option --json is required for the project
+                              https://github.com/scmschmidt/trento_checks_for_supportconfig.
 """
 
 import argparse
@@ -304,7 +305,7 @@ class ArgParser(argparse.ArgumentParser):
                 Usage:  {prog} -h|--help
                         {prog} [-d|--debug] [-r|--raw] [-a KEY|-A KEYFILE|-f CRED|-F CREDFILE] URL ListExecutions [SCOPE]
                         {prog} [-d|--debug] [-r|--raw] [-a KEY|-A KEYFILE|-f CRED|-F CREDFILE] URL ExecuteCheck -e ENV_PARAM...
-                        {len(prog) * ' '} -t|--target TARGET... -c|--check CHECK... [--timeout TIMEOUT] [--json] [--details]
+                        {len(prog) * ' '} -t|--target TARGET... -c|--check CHECK... [--timeout TIMEOUT] [--json] [--brief]
                         {prog} [-d|--debug] [-r|--raw] [-a KEY|-A KEYFILE|-f CRED|-F CREDFILE] URL ListChecks [-c|--check CHECK...]
                         {prog} [-d|--debug] [-r|--raw] [-a KEY|-A KEYFILE|-f CRED|-F CREDFILE] URL Health
                         {prog} [-d|--debug] [-r|--raw] [-a KEY|-A KEYFILE|-f CRED|-F CREDFILE] URL Ready
@@ -359,7 +360,7 @@ class ArgParser(argparse.ArgumentParser):
                         --timeout TIMEOUT           timeout in seconds waiting for an execution to appear or to complete 
                         --no-progress               disables progress dots during check execution
                         --json                      print results as JSON string
-                        --details                   results are more detailed
+                        --brief                     print only check id, agent id and result
 
                     ListChecks:
                     
@@ -474,8 +475,8 @@ def argument_parse() -> argparse.Namespace:
                                       dest='json_output',
                                       action='store_true',
                                       required = False) 
-    parser_execute_check.add_argument('--details',
-                                      dest='details',
+    parser_execute_check.add_argument('--brief',
+                                      dest='brief',
                                       action='store_true',
                                       required = False)   
 
@@ -641,37 +642,33 @@ def main():
                         # With one check per execution request, the `check_results`
                         # list has only one element.
                         check_result = response['check_results'][0]
-                                               
-                        #TODO: Implement arguments.details            
-                                                    
+                       
                         # Walk through the agent's results.    
                         for agents_check_result in check_result['agents_check_results']:
                             result = {'check': check_result['check_id'],
                                       'agent_id': agents_check_result['agent_id'],
-                                      'result': check_result['result'],
-                                      'execution_id': response['execution_id']
-                            }
-                            #result = f'''check={check_result['check_id']} agent_id={agents_check_result['agent_id']} result={check_result['result']} execution_id={response['execution_id']}'''
-                            
-                            # Collect all (error) messages.
-                            messages = []
-                            if 'message' in agents_check_result:
-                                messages.append(agents_check_result['message'])                           
-                            for fact in agents_check_result['facts']:
-                                if 'message' in fact:
-                                    messages.append(fact['message'])                                
-                            if 'expectation_evaluations' in agents_check_result:
-                                for evaluation in agents_check_result['expectation_evaluations']:
-                                    if 'failure_message' in evaluation :
-                                        messages.append(evaluation['failure_message'])
-                            if messages:
-                                #result += f''' message="{'; '.join(messages)}"'''
-                                result['messages'] = '; '.join(messages)
-                                
-                            # Add error type if present.
-                            if 'type' in agents_check_result:
-                                #result += f''' type={agents_check_result['type']}''' 
-                                result['type'] = agents_check_result['type']
+                                      'result': check_result['result']
+                                     }
+                            if not arguments.brief:
+                                result['execution_id'] = response['execution_id']
+
+                                # Collect all (error) messages.
+                                messages = []
+                                if 'message' in agents_check_result:
+                                    messages.append(agents_check_result['message'])                           
+                                for fact in agents_check_result['facts']:
+                                    if 'message' in fact:
+                                        messages.append(fact['message'])                                
+                                if 'expectation_evaluations' in agents_check_result:
+                                    for evaluation in agents_check_result['expectation_evaluations']:
+                                        if 'failure_message' in evaluation :
+                                            messages.append(evaluation['failure_message'])
+                                if messages:
+                                    result['messages'] = '; '.join(messages)
+                                    
+                                # Add error type if present.
+                                if 'type' in agents_check_result:
+                                    result['type'] = agents_check_result['type']
                             
                             results.append(result)                                
                                    
@@ -686,42 +683,7 @@ def main():
 
                 except Exception as err:
                     unknown_response(responses, err)
-                
-                # try:
-                #     for check_result in response['check_results']:
-                #         for agents_check_result in check_result['agents_check_results']:
-                #             message = f'''check={check_result['check_id']} agent_id={agents_check_result['agent_id']} result={check_result['result']} execution_id={response['execution_id']}'''
-                #             if 'message' in agents_check_result:
-                #                 message += f''' message="{agents_check_result['message']}" type={agents_check_result['type']}'''
-                #             print(message)  
-                    
-                    
-                    
-                #     #TODO: FOR EVALUATION PURPOSES CURRENTLY
-                #     if 'CARROT' in os.environ:
-                #         import pprint
-                #         result_evaluated = {'result': response['result'],
-                #                             'checks_results': []
-                #                            }
-                #         for check_result in response['check_results']:
-                #             check_result_evaluated = {'agents_check_results': [],
-                #                                       'check_id': check_result['check_id'],
-                #                                       'expectation_results': [], #TODO
-                #                                       'result': check_result['result']
-                #                                      }
-                #             for agents_check_result in check_result['agents_check_results']:
-                #                 pprint.pprint(agents_check_result)
-                #                 check_result_evaluated['agents_check_results'].append({'agent_id': agents_check_result['agent_id'],
-                #                                                                                    'expectation_evaluations': agents_check_result['expectation_evaluations'], # [x['return_value'] for x in agents_check_result['expectation_evaluations']]
-                #                                                                                    'message': agents_check_result['message'] if message in agents_check_result else None
-                #                                                                                   })
-                                
-                #             result_evaluated['checks_results'].append(check_result_evaluated)
-                #         print('\n---')
-                #         pprint.pprint(result_evaluated)
-                        
-                # except Exception as err:
-                #     unknown_response(response, err)
+
                     
         # Command: ListExecutions
         elif arguments.command == 'ListExecutions':
